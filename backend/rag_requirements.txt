@@ -1,10 +1,8 @@
-# ✅ FINAL — all versions confirmed compatible with each other
-# Key: langchain-chroma 0.1.4 needs chromadb<0.6.0, so we use 0.5.23
-
 fastapi==0.115.0
 uvicorn[standard]==0.30.0
 anthropic>=0.41.0
-pydantic==2.8.0
+pydantic==2.10.6          
+pydantic-settings==2.3.0  
 python-dotenv==1.0.1
 
 # RAG Stack
