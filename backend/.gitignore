@@ -1,0 +1,24 @@
+.env
+.env.local
+.env.development
+.env.production
+.env.*
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Node / JS
+node_modules/
+
+# OS junk files
+.DS_Store
+Thumbs.db
+
+# IDE settings
+.vscode/
+.idea/
+
+# Database config
+Db.py
