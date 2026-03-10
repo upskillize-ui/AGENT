@@ -35,11 +35,8 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        os.getenv("FRONTEND_URL", "https://lms.upskillize.com"),
-    ],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -48,7 +45,7 @@ app.add_middleware(
 
 class IngestLectureRequest(BaseModel):
     lecture_id: int
-    force_reingest: bool = False   # set True to re-embed even if already indexed
+    force_reingest: bool = False
 
 class IngestCourseRequest(BaseModel):
     course_id: int
@@ -61,21 +58,19 @@ class GenerateTestRequest(BaseModel):
     difficulty: Literal["easy", "medium", "hard", "complex"] = "medium"
     question_types: list[Literal["mcq", "msq", "true_false"]] = ["mcq"]
     student_id: Optional[str] = None
-    # Scope — at least one required
-    lecture_id: Optional[int] = None   # test from a single lecture
-    course_id: Optional[int] = None    # test from the whole course
+    lecture_id: Optional[int] = None
+    course_id: Optional[int] = None
 
 class SubmitAnswersRequest(BaseModel):
     test_id: str
     student_id: str
     questions: list[dict]
-    answers: dict[str, list[str]]      # {"q1": ["B"], "q2": ["A","C"]}
+    answers: dict[str, list[str]]
     time_taken_seconds: int
 
 # ── Background ingestion task ─────────────────────────────────────────────────
 
 def _ingest_lecture_task(lecture_id: int):
-    """Runs in background after trigger — safe to call from Node.js webhook."""
     lecture = fetch_lecture_content(lecture_id)
     if not lecture:
         print(f"[INGEST] Lecture {lecture_id} not found in DB")
@@ -87,6 +82,15 @@ def _ingest_lecture_task(lecture_id: int):
     print(f"[INGEST] Lecture {lecture_id} — {count} new chunks added")
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
+
+@app.get("/")
+def root():
+    return {
+        "status": "ok",
+        "agent": "RAG Mock Test Agent",
+        "version": "3.0.0",
+        "embed_model": os.getenv("EMBED_MODEL", "all-MiniLM-L6-v2"),
+    }
 
 @app.get("/api/health")
 def health():
@@ -103,11 +107,6 @@ async def ingest_lecture_endpoint(
     req: IngestLectureRequest,
     background_tasks: BackgroundTasks,
 ):
-    """
-    Trigger ingestion of a single lecture into the vector store.
-    Call this from Node.js when a lecture is created/updated.
-    Runs in the background — returns immediately.
-    """
     background_tasks.add_task(_ingest_lecture_task, req.lecture_id)
     return {
         "status": "ingestion_started",
@@ -121,7 +120,6 @@ async def ingest_course_endpoint(
     req: IngestCourseRequest,
     background_tasks: BackgroundTasks,
 ):
-    """Ingest all lectures for an entire course in the background."""
     def task():
         lectures = fetch_course_content(req.course_id)
         total = ingest_course(lectures)
@@ -137,19 +135,12 @@ async def ingest_course_endpoint(
 
 @app.post("/api/generate-test")
 async def generate_test(req: GenerateTestRequest):
-    """
-    RAG pipeline:
-      1. Semantic search over your vectorised content
-      2. Retrieved chunks → Claude prompt (strictly grounded)
-      3. Returns structured test JSON
-    """
     if not req.lecture_id and not req.course_id:
         raise HTTPException(
             status_code=400,
             detail="Provide at least one of: lecture_id or course_id"
         )
 
-    # Step 1 — Retrieve relevant chunks
     context, sources = retrieve_context(
         query=req.topic,
         lecture_id=req.lecture_id,
@@ -164,7 +155,6 @@ async def generate_test(req: GenerateTestRequest):
             )
         )
 
-    # Step 2 — Generate questions grounded in retrieved context
     try:
         test_data = generate_questions(
             topic=req.topic,
@@ -180,16 +170,15 @@ async def generate_test(req: GenerateTestRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Generation failed: {e}")
 
-    test_data["test_id"]       = f"test_{uuid.uuid4().hex[:10]}"
-    test_data["generated_at"]  = int(time.time())
-    test_data["lecture_id"]    = req.lecture_id
-    test_data["student_id"]    = req.student_id
+    test_data["test_id"]      = f"test_{uuid.uuid4().hex[:10]}"
+    test_data["generated_at"] = int(time.time())
+    test_data["lecture_id"]   = req.lecture_id
+    test_data["student_id"]   = req.student_id
     return test_data
 
 
 @app.post("/api/submit-answers")
 async def submit_answers(req: SubmitAnswersRequest):
-    """Evaluate answers and return grounded feedback + study recommendations."""
     try:
         result = evaluate_answers(
             questions=req.questions,

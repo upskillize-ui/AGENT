@@ -3,6 +3,7 @@
 .env.development
 .env.production
 .env.*
+ ca.pem
 
 # Python cache
 __pycache__/
@@ -22,3 +23,6 @@ Thumbs.db
 
 # Database config
 # Db.py
+
+# ChromaDB local storage
+chroma_store/

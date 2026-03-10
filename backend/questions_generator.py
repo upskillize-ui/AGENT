@@ -9,7 +9,7 @@ import json
 import anthropic
 
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-MODEL = "claude-opus-4-5"
+MODEL = "claude-opus-4-6"
 
 DIFFICULTY_GUIDE = {
     "easy":    "recall and definitions directly stated in the retrieved material",
@@ -66,10 +66,10 @@ Generate exactly {num_questions} mock test question(s) on the topic: "{topic}"
 
 ABSOLUTE RULES — NEVER BREAK THESE:
 1. Every question MUST be directly answerable from the retrieved material above.
-2. Do NOT use any outside knowledge, general facts, or information not present in the material.
+2. Avoid using any outside knowledge, general facts, or information not present in the material.
 3. If a concept is not in the retrieved material, do NOT create a question about it.
 4. Use the exact terminology, examples, and explanations from the source material.
-5. The explanation field MUST cite which [SOURCE N] contains the answer.
+5. The explanation field MUST cite which [SOURCE N] contains the answer and suggested reading.
 
 CONFIGURATION:
 - Difficulty: {difficulty} → focus on {DIFFICULTY_GUIDE[difficulty]}

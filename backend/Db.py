@@ -1,56 +1,46 @@
 """
-db.py — MySQL connector
-Reads your platform's learning content from MySQL.
-Edit the table/column names to match YOUR actual schema.
+db.py — MySQL connector for upskillize_lms
+Mapped to actual schema: lessons, course_modules, courses
 """
 
 import os
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
-from typing import Optional
-
-# ── Connection ────────────────────────────────────────────────────────────────
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "mysql+pymysql://root:yourpassword@localhost:3306/your_database_name"
+    "mysql+pymysql://root:yourpassword@localhost:3306/upskillize_lms"
 )
 
-# Aiven Cloud requires SSL — place ca.pem in the same folder as db.py
 _ca_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ca.pem")
 _ssl_args = {}
 if os.path.exists(_ca_path):
     _ssl_args = {"connect_args": {"ssl": {"ca": _ca_path}}}
     print(f"[DB] SSL enabled using: {_ca_path}")
 else:
-    print("[DB] WARNING: ca.pem not found — connection may fail on Aiven Cloud")
+    print("[DB] WARNING: ca.pem not found")
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=3600, **_ssl_args)
 SessionLocal = sessionmaker(bind=engine)
 
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-# ── Content fetchers ──────────────────────────────────────────────────────────
-# ⚠️  EDIT THESE QUERIES to match your actual MySQL table/column names.
-# The function signatures and return shape must stay the same.
-
 def fetch_lecture_content(lecture_id: int) -> dict:
-    """
-    Fetch a single lecture's text content.
-    Returns: { id, title, transcript, description }
-    """
+    """Fetch a single lesson by ID."""
     with SessionLocal() as db:
         row = db.execute(text("""
-            SELECT id, title, transcript, description
-            FROM lectures                          -- ← your table name
-            WHERE id = :lecture_id AND is_active = 1
+            SELECT l.id,
+                   l.lesson_name   AS title,
+                   l.description   AS transcript,
+                   l.description,
+                   l.content_type,
+                   l.content_url,
+                   l.youtube_video_id,
+                   c.course_name,
+                   cm.module_name
+            FROM lessons l
+            JOIN course_modules cm ON l.course_module_id = cm.id
+            JOIN courses c         ON cm.course_id = c.id
+            WHERE l.id = :lecture_id
         """), {"lecture_id": lecture_id}).fetchone()
 
         if not row:
@@ -59,70 +49,58 @@ def fetch_lecture_content(lecture_id: int) -> dict:
 
 
 def fetch_notes_for_lecture(lecture_id: int) -> list[dict]:
-    """
-    Fetch all class notes linked to a lecture.
-    Returns: [{ id, title, content, format }]
-    """
-    with SessionLocal() as db:
-        rows = db.execute(text("""
-            SELECT id, title, content, format    -- format: 'html' | 'text'
-            FROM class_notes                     -- ← your table name
-            WHERE lecture_id = :lecture_id
-            ORDER BY created_at ASC
-        """), {"lecture_id": lecture_id}).fetchall()
-        return [dict(r._mapping) for r in rows]
+    """No notes table in schema — returns empty list."""
+    return []
 
 
 def fetch_pdfs_for_lecture(lecture_id: int) -> list[dict]:
-    """
-    Fetch PDF study materials for a lecture.
-    Returns: [{ id, title, file_url, file_path }]
-    """
+    """Fetch PDF/PPT lessons linked to the same module as this lesson."""
     with SessionLocal() as db:
         rows = db.execute(text("""
-            SELECT id, title, file_url, file_path
-            FROM study_materials                  -- ← your table name
-            WHERE lecture_id = :lecture_id
-              AND material_type = 'pdf'
-            ORDER BY created_at ASC
+            SELECT l.id, l.lesson_name AS title, l.content_url AS file_url
+            FROM lessons l
+            WHERE l.course_module_id = (
+                SELECT course_module_id FROM lessons WHERE id = :lecture_id
+            )
+            AND l.content_type IN ('pdf', 'ppt')
         """), {"lecture_id": lecture_id}).fetchall()
         return [dict(r._mapping) for r in rows]
 
 
 def fetch_case_studies_for_lecture(lecture_id: int) -> list[dict]:
-    """
-    Fetch case studies linked to a lecture.
-    Returns: [{ id, title, body }]
-    """
-    with SessionLocal() as db:
-        rows = db.execute(text("""
-            SELECT id, title, body
-            FROM case_studies                     -- ← your table name
-            WHERE lecture_id = :lecture_id
-            ORDER BY created_at ASC
-        """), {"lecture_id": lecture_id}).fetchall()
-        return [dict(r._mapping) for r in rows]
+    """No case_studies table in schema — returns empty list."""
+    return []
 
 
 def fetch_course_content(course_id: int) -> list[dict]:
     """
-    Fetch ALL lectures + materials for an entire course.
-    Used when student wants a test across the full course.
-    Returns: [{ lecture_id, lecture_title, transcript, notes: [], pdfs: [], cases: [] }]
+    Fetch ALL lessons for an entire course across all modules.
+    This is what gets called when student ingests a course for TestGen.
     """
     with SessionLocal() as db:
-        lectures = db.execute(text("""
-            SELECT id, title, transcript, description
-            FROM lectures
-            WHERE course_id = :course_id AND is_active = 1
-            ORDER BY sequence_order ASC
+        rows = db.execute(text("""
+            SELECT
+                l.id,
+                l.lesson_name        AS title,
+                l.description        AS transcript,
+                l.content_type,
+                l.content_url,
+                l.youtube_video_id,
+                cm.module_name,
+                c.course_name,
+                c.id                 AS course_id
+            FROM lessons l
+            JOIN course_modules cm ON l.course_module_id = cm.id
+            JOIN courses c         ON cm.course_id = c.id
+            WHERE c.id = :course_id
+            ORDER BY cm.sequence_order ASC, l.sequence_order ASC
         """), {"course_id": course_id}).fetchall()
 
         result = []
-        for lec in lectures:
-            d = dict(lec._mapping)
-            d["notes"]  = fetch_notes_for_lecture(d["id"])
-            d["pdfs"]   = fetch_pdfs_for_lecture(d["id"])
-            d["cases"]  = fetch_case_studies_for_lecture(d["id"])
+        for row in rows:
+            d = dict(row._mapping)
+            d["notes"] = []
+            d["pdfs"]  = []
+            d["cases"] = []
             result.append(d)
         return result
