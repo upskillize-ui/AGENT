@@ -34,10 +34,6 @@ def generate_questions(
     question_types: list[str],
     duration_minutes: int,
 ) -> dict:
-    """
-    Generate questions grounded strictly in the retrieved context.
-    Returns structured JSON with questions + metadata.
-    """
     if not context.strip():
         raise ValueError(
             "No relevant content found in your platform's materials for this topic. "
@@ -50,33 +46,26 @@ def generate_questions(
         for s in sources
     )
 
-    prompt = f"""You are an expert assessment designer for an online learning platform.
+    prompt = f"""You are an assessment designer for an online learning platform.
 
-Below is the ONLY material you are allowed to use. It has been retrieved from the platform's own lectures, notes, PDFs, and case studies.
+Use ONLY the material below to create questions. No outside knowledge allowed.
 
 === RETRIEVED COURSE MATERIAL ===
 {context}
 === END OF MATERIAL ===
 
-Sources used:
+Sources:
 {source_list}
 
-YOUR TASK:
-Generate exactly {num_questions} mock test question(s) on the topic: "{topic}"
+Generate exactly {num_questions} question(s) on: "{topic}"
 
-ABSOLUTE RULES — NEVER BREAK THESE:
-1. Every question MUST be directly answerable from the retrieved material above.
-2. Avoid using any outside knowledge, general facts, or information not present in the material.
-3. If a concept is not in the retrieved material, do NOT create a question about it.
-4. Use the exact terminology, examples, and explanations from the source material.
-5. The explanation field MUST cite which [SOURCE N] contains the answer and suggested reading.
+Rules:
+1. Every question must be answerable from the material above only.
+2. Use exact terminology from the source material.
+3. Distribute question types evenly: {', '.join(question_types)}
+4. Difficulty: {difficulty} → {DIFFICULTY_GUIDE[difficulty]}
 
-CONFIGURATION:
-- Difficulty: {difficulty} → focus on {DIFFICULTY_GUIDE[difficulty]}
-- Question types to include (distribute evenly): {', '.join(question_types)}
-- Duration: {duration_minutes} minutes
-
-QUESTION TYPE RULES:
+Question type rules:
 {types_desc}
 
 Return ONLY valid JSON — no markdown, no extra text:
@@ -92,20 +81,19 @@ Return ONLY valid JSON — no markdown, no extra text:
       "question": "Question text here?",
       "options": {{"A": "...", "B": "...", "C": "...", "D": "..."}},
       "correct_answers": ["B"],
-      "explanation": "According to [SOURCE 1] (Lecture transcript), the answer is B because ...",
-      "source_reference": "[SOURCE 1] — Transcript: Introduction to Neural Networks"
+      "explanation": "Brief 1-line explanation citing [SOURCE N].",
+      "source_reference": "[SOURCE 1] — Transcript: Lecture Title"
     }}
   ]
 }}"""
 
     message = client.messages.create(
         model=MODEL,
-        max_tokens=2048,
+        max_tokens=1500,
         messages=[{"role": "user", "content": prompt}],
     )
 
     raw = message.content[0].text.strip()
-    # Strip accidental markdown fences
     if raw.startswith("```"):
         lines = raw.split("\n")
         raw = "\n".join(lines[1:])
@@ -124,10 +112,6 @@ def evaluate_answers(
     test_id: str,
     time_taken_seconds: int,
 ) -> dict:
-    """
-    Evaluate student answers. Feedback is grounded in the source material citations
-    already embedded in each question's explanation field.
-    """
     qa_breakdown = []
     score = 0
 
@@ -138,29 +122,23 @@ def evaluate_answers(
         if is_correct:
             score += 1
         qa_breakdown.append({
-            "id":               q["id"],
-            "question":         q["question"],
-            "type":             q.get("type", "mcq"),
-            "options":          q.get("options", {}),
-            "student_answer":   student_ans,
-            "correct_answer":   correct_ans,
-            "is_correct":       is_correct,
-            "explanation":      q.get("explanation", ""),
-            "source_reference": q.get("source_reference", ""),
+            "id":             q["id"],
+            "question":       q["question"],
+            "type":           q.get("type", "mcq"),
+            "student_answer": student_ans,
+            "correct_answer": correct_ans,
+            "is_correct":     is_correct,
         })
 
     pct = round(score / len(questions) * 100, 1) if questions else 0
 
-    prompt = f"""You are an educational coach reviewing a student's mock test.
-All questions were generated from the student's own course materials.
+    prompt = f"""You are a friendly tutor giving brief feedback on a student's test.
 
-Results: {score}/{len(questions)} correct ({pct}%)
-Time taken: {time_taken_seconds // 60}m {time_taken_seconds % 60}s
+Score: {score}/{len(questions)} ({pct}%) in {time_taken_seconds // 60}m {time_taken_seconds % 60}s
 
-Detailed breakdown:
 {json.dumps(qa_breakdown, indent=2)}
 
-Provide feedback that references the specific source materials (as cited in explanation fields).
+Give short, warm, human feedback. Max 1-2 lines per question.
 Return ONLY valid JSON:
 {{
   "score": {score},
@@ -168,28 +146,25 @@ Return ONLY valid JSON:
   "percentage": {pct},
   "time_taken_seconds": {time_taken_seconds},
   "performance_band": "Excellent|Good|Average|Needs Improvement",
-  "overall_feedback": "2-3 sentences referencing the actual course materials covered.",
-  "weak_areas": ["concept from material"],
-  "strong_areas": ["concept from material"],
+  "overall_feedback": "One friendly sentence about their performance.",
+  "weak_areas": ["topic"],
+  "strong_areas": ["topic"],
   "results": [
     {{
       "id": "q1",
       "is_correct": true,
       "student_answer": ["B"],
       "correct_answer": ["B"],
-      "feedback": "Specific feedback citing the source material.",
-      "source_reference": "..."
+      "feedback": "One short friendly line.",
+      "source_reference": ""
     }}
   ],
-  "study_recommendations": [
-    "Re-read [specific section] in [source title]",
-    "Review [concept] from [lecture title]"
-  ]
+  "study_recommendations": ["One short tip per weak area, max 3 tips total"]
 }}"""
 
     message = client.messages.create(
         model=MODEL,
-        max_tokens=1024,
+        max_tokens=600,
         messages=[{"role": "user", "content": prompt}],
     )
 
