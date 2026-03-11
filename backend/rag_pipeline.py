@@ -1,9 +1,9 @@
 """
 rag_pipeline.py
 Ingestion  → chunks raw text from MySQL content
-Embedding  → sentence-transformers (local, free, no API key needed)
-Vector Store → ChromaDB (persistent on disk)
-Retriever  → LangChain similarity search
+Embedding  → sentence-transformers (local, free)
+Vector Store → Aiven MySQL (persistent, never lost on restart)
+Retriever  → cosine similarity search
 """
 
 import os
@@ -11,28 +11,24 @@ import hashlib
 from typing import Optional
 import requests
 
-# ── Updated imports — no deprecation warnings ─────────────────────────────────
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.documents import Document
 
-# PDF text extraction
 from pypdf import PdfReader
 import io
-
-# HTML stripping
 from bs4 import BeautifulSoup
+
+from chroma_mysql import init_vector_table, already_indexed, add_documents, similarity_search
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-CHROMA_DIR    = os.getenv("CHROMA_PERSIST_DIR", "./chroma_store")
 EMBED_MODEL   = os.getenv("EMBED_MODEL", "all-MiniLM-L6-v2")
 CHUNK_SIZE    = int(os.getenv("CHUNK_SIZE", "800"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "150"))
 TOP_K         = int(os.getenv("RETRIEVER_TOP_K", "6"))
 
-# ── Embeddings (loaded once at startup) ───────────────────────────────────────
+# ── Embeddings ────────────────────────────────────────────────────────────────
 
 print("[RAG] Loading embedding model:", EMBED_MODEL)
 embeddings = HuggingFaceEmbeddings(
@@ -41,13 +37,9 @@ embeddings = HuggingFaceEmbeddings(
     encode_kwargs={"normalize_embeddings": True},
 )
 
-# ── Vector store ──────────────────────────────────────────────────────────────
+# ── Init MySQL vector table ───────────────────────────────────────────────────
 
-vectorstore = Chroma(
-    collection_name="learning_content",
-    embedding_function=embeddings,
-    persist_directory=CHROMA_DIR,
-)
+init_vector_table()
 
 # ── Text splitter ─────────────────────────────────────────────────────────────
 
@@ -64,7 +56,6 @@ def _strip_html(html: str) -> str:
 
 
 def _extract_pdf_text(source) -> str:
-    """Extract text from a PDF given a URL, local path, or bytes."""
     try:
         if isinstance(source, str) and source.startswith("http"):
             resp = requests.get(source, timeout=30)
@@ -83,14 +74,8 @@ def _extract_pdf_text(source) -> str:
 
 
 def _content_id(lecture_id: int, source_type: str, source_id) -> str:
-    """Stable ID so we can check if content is already indexed."""
     key = f"{lecture_id}:{source_type}:{source_id}"
     return hashlib.md5(key.encode()).hexdigest()
-
-
-def _already_indexed(content_id: str) -> bool:
-    results = vectorstore.get(where={"content_id": content_id}, limit=1)
-    return len(results["ids"]) > 0
 
 
 # ── Ingestion ─────────────────────────────────────────────────────────────────
@@ -104,7 +89,7 @@ def ingest_lecture(lecture_data: dict) -> int:
         if not text or not text.strip():
             return
         cid = _content_id(lecture_id, source_type, source_id)
-        if _already_indexed(cid):
+        if already_indexed(cid):
             print(f"[RAG] Already indexed: {source_type} {source_id} — skipping")
             return
         chunks = splitter.split_text(text.strip())
@@ -139,9 +124,10 @@ def ingest_lecture(lecture_data: dict) -> int:
         add_chunks(case.get("body", ""), "case_study", case["id"], case.get("title", "Case Study"))
 
     if docs:
-        vectorstore.add_documents(docs)
-        print(f"[RAG] Ingested {len(docs)} chunks for lecture {lecture_id}")
-    return len(docs)
+        count = add_documents(docs, embeddings)
+        print(f"[RAG] Ingested {count} chunks for lecture {lecture_id}")
+        return count
+    return 0
 
 
 def ingest_course(course_lectures: list[dict]) -> int:
@@ -159,43 +145,35 @@ def retrieve_context(
     course_id: Optional[int] = None,
     top_k: int = TOP_K,
 ) -> tuple[str, list[dict]]:
-    where_filter = None
-    if lecture_id:
-        where_filter = {"lecture_id": lecture_id}
 
-    results: list[Document] = vectorstore.similarity_search(
-        query,
-        k=top_k,
-        filter=where_filter,
-    )
+    query_vector = embeddings.embed_query(query)
+    results = similarity_search(query_vector, lecture_id=lecture_id, top_k=top_k)
 
     if not results:
         return "", []
 
-    seen = set()
-    unique_docs = []
-    for doc in results:
-        key = doc.metadata.get("content_id", "") + str(doc.metadata.get("chunk_index", 0))
-        if key not in seen:
-            seen.add(key)
-            unique_docs.append(doc)
-
     parts = []
     sources = []
-    for i, doc in enumerate(unique_docs):
-        m = doc.metadata
+    seen = set()
+
+    for i, row in enumerate(results):
+        key = f"{row.content_id}_{row.chunk_index}"
+        if key in seen:
+            continue
+        seen.add(key)
+
         header = (
-            f"[SOURCE {i+1}] {m.get('source_title', 'Unknown')} "
-            f"({m.get('source_type', '').upper()}) | "
-            f"Lecture: {m.get('lecture_title', '')}"
+            f"[SOURCE {i+1}] {row.source_title} "
+            f"({row.source_type.upper()}) | "
+            f"Lecture: {row.lecture_title}"
         )
-        parts.append(f"{header}\n{doc.page_content}")
+        parts.append(f"{header}\n{row.page_content}")
         sources.append({
             "index":         i + 1,
-            "source_title":  m.get("source_title"),
-            "source_type":   m.get("source_type"),
-            "lecture_title": m.get("lecture_title"),
-            "lecture_id":    m.get("lecture_id"),
+            "source_title":  row.source_title,
+            "source_type":   row.source_type,
+            "lecture_title": row.lecture_title,
+            "lecture_id":    row.lecture_id,
         })
 
     return "\n\n---\n\n".join(parts), sources

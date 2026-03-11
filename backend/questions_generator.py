@@ -9,7 +9,7 @@ import json
 import anthropic
 
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-MODEL = "claude-opus-4-6"
+MODEL = "claude-haiku-4-5-20251001"
 
 DIFFICULTY_GUIDE = {
     "easy":    "recall and definitions directly stated in the retrieved material",
@@ -100,7 +100,7 @@ Return ONLY valid JSON — no markdown, no extra text:
 
     message = client.messages.create(
         model=MODEL,
-        max_tokens=4096,
+        max_tokens=2048,
         messages=[{"role": "user", "content": prompt}],
     )
 
@@ -189,7 +189,7 @@ Return ONLY valid JSON:
 
     message = client.messages.create(
         model=MODEL,
-        max_tokens=2048,
+        max_tokens=1024,
         messages=[{"role": "user", "content": prompt}],
     )
 
