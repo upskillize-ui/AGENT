@@ -1,0 +1,39 @@
+# Environment & Secrets
+.env
+*.env
+backend/.env
+.env.local
+.env.production
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pycache
+
+# ChromaDB
+chroma_store/
+backend/chroma_store/
+
+# SSL certificates (keep ca.pem local only)
+# ca.pem  ← uncomment if you don't want to push this
+
+# Node
+node_modules/
+npm-debug.log
+
+# VS Code
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Build output
+dist/
+build/
