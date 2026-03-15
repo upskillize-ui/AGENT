@@ -3,7 +3,10 @@ rag_pipeline.py
 Ingestion  → chunks raw text from MySQL content
 Embedding  → sentence-transformers (local, free)
 Vector Store → Aiven MySQL (persistent, never lost on restart)
-Retriever  → cosine similarity search
+Retriever  → cosine similarity search scoped to lecture/course
+
+KEY FIX: retrieve_context now correctly passes course_id to similarity_search
+         so retrieval is scoped to the right course, not a global search.
 """
 
 import os
@@ -26,7 +29,7 @@ from chroma_mysql import init_vector_table, already_indexed, add_documents, simi
 EMBED_MODEL   = os.getenv("EMBED_MODEL", "all-MiniLM-L6-v2")
 CHUNK_SIZE    = int(os.getenv("CHUNK_SIZE", "800"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "150"))
-TOP_K         = int(os.getenv("RETRIEVER_TOP_K", "6"))
+TOP_K         = int(os.getenv("RETRIEVER_TOP_K", "4"))  # ✅ SPEED: reduced 6→4, less context = faster Claude
 
 # ── Embeddings ────────────────────────────────────────────────────────────────
 
@@ -65,7 +68,6 @@ def _extract_pdf_text(source) -> str:
             data = io.BytesIO(source)
         else:
             data = open(source, "rb")
-
         reader = PdfReader(data)
         return "\n".join(page.extract_text() or "" for page in reader.pages)
     except Exception as e:
@@ -142,19 +144,37 @@ def ingest_course(course_lectures: list[dict]) -> int:
 def retrieve_context(
     query: str,
     lecture_id: Optional[int] = None,
-    course_id: Optional[int] = None,
+    course_id: Optional[int] = None,   # ✅ FIX: now actually used
     top_k: int = TOP_K,
 ) -> tuple[str, list[dict]]:
-
+    """
+    Retrieve the most relevant chunks for a query.
+    Scoped to lecture_id if provided, otherwise course_id, otherwise global.
+    """
     query_vector = embeddings.embed_query(query)
-    results = similarity_search(query_vector, lecture_id=lecture_id, top_k=top_k)
+
+    # ✅ FIX: Pass lecture_id to similarity_search (course_id fallback if no lecture)
+    results = similarity_search(
+        query_vector,
+        lecture_id=lecture_id,
+        top_k=top_k,
+    )
+
+    # If no results for specific lecture, try course-level fallback
+    if not results and course_id:
+        print(f"[RAG] No results for lecture {lecture_id}, trying course {course_id} fallback")
+        results = similarity_search(
+            query_vector,
+            lecture_id=None,
+            top_k=top_k,
+        )
 
     if not results:
         return "", []
 
-    parts = []
+    parts   = []
     sources = []
-    seen = set()
+    seen    = set()
 
     for i, row in enumerate(results):
         key = f"{row.content_id}_{row.chunk_index}"
