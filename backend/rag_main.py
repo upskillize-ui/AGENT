@@ -54,7 +54,7 @@ class IngestCourseRequest(BaseModel):
 class GenerateTestRequest(BaseModel):
     topic: str = Field(..., description="Topic or subject to test on")
     num_questions: int = Field(default=10, ge=1, le=50)
-    duration_minutes: int = Field(default=30, ge=5, le=180)
+    duration_minutes: int = Field(default=30, ge=1, le=180)
     difficulty: Literal["easy", "medium", "hard", "complex"] = "medium"
     question_types: list[Literal["mcq", "msq", "true_false"]] = ["mcq"]
     student_id: Optional[str] = None

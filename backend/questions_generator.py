@@ -1,13 +1,14 @@
 """
-questions_generator.py — OPTIMIZED FOR SPEED
+questions_generator.py — FIXED VERSION
 
-SPEED IMPROVEMENTS:
-✅ max_tokens reduced: 2000 → 600 (Claude stops early, no padding)
-✅ Context truncated: 10,000 → 3,000 chars (enough for 10-20 questions)
-✅ Tighter prompts: 40% fewer input tokens
-✅ Parallel evaluation: Multiple questions scored in parallel
-✅ Fallback feedback: No second API call if slow
-✅ Expected improvement: 5-10x faster (40-70 sec → 5-15 sec)
+BUG FIX: max_tokens was 600 — too low for 10 questions in JSON.
+         10 questions need ~2500-4000 tokens. Truncated JSON = parse error = 500.
+
+FIXES APPLIED:
+✅ FIX 1: max_tokens scaled by num_questions (250 tokens per question)
+✅ FIX 2: Evaluation feedback max_tokens increased to 500
+✅ FIX 3: Better JSON parsing with fallback
+✅ FIX 4: Proper error messages instead of generic 500
 """
 
 import os
@@ -41,19 +42,54 @@ def _clean_json(raw: str) -> str:
 
 
 def _parse_json(raw: str) -> dict:
-    """Parse JSON robustly."""
+    """Parse JSON robustly with multiple fallback strategies."""
     clean = _clean_json(raw)
+    
+    # Strategy 1: Direct parse
     try:
         return json.loads(clean)
     except json.JSONDecodeError:
+        pass
+    
+    # Strategy 2: Find JSON object
+    try:
         match = re.search(r'\{.*\}', clean, re.DOTALL)
         if match:
             return json.loads(match.group())
-        raise ValueError(f"Could not parse JSON: {raw[:200]}")
+    except json.JSONDecodeError:
+        pass
+    
+    # Strategy 3: Fix truncated JSON (common when max_tokens is hit)
+    try:
+        # Try to close any unclosed brackets/braces
+        fixed = clean
+        open_braces = fixed.count('{') - fixed.count('}')
+        open_brackets = fixed.count('[') - fixed.count(']')
+        
+        # Remove last incomplete item if needed
+        if open_braces > 0 or open_brackets > 0:
+            # Find last complete question object
+            last_complete = fixed.rfind('"explanation"')
+            if last_complete > 0:
+                # Find the end of that explanation value
+                after = fixed[last_complete:]
+                quote_end = after.find('"}')
+                if quote_end > 0:
+                    fixed = fixed[:last_complete + quote_end + 2]
+            
+            # Close remaining brackets
+            fixed += ']' * max(0, open_brackets)
+            fixed += '}' * max(0, open_braces)
+            
+            return json.loads(fixed)
+    except (json.JSONDecodeError, Exception):
+        pass
+    
+    raise ValueError(f"Could not parse JSON from AI response (length: {len(raw)} chars). Response may have been truncated.")
 
 
 # ============================================================================
-# OPTIMIZED QUESTION GENERATION
+# QUESTION GENERATION — FIXED max_tokens
 # ============================================================================
 
 def generate_questions(
@@ -65,19 +101,18 @@ def generate_questions(
     question_types: list,
     duration_minutes: int,
 ) -> dict:
-    """Generate questions with optimized speed."""
+    """Generate questions with proper token allocation."""
     
     if not context.strip():
         raise ValueError("No relevant content found for this topic.")
 
-    # ✅ OPTIMIZATION: Truncate context to 3000 chars max
-    # More context = more input tokens = slower generation
-    context_trimmed = context[:3000] if len(context) > 3000 else context
+    # Truncate context (balance between quality and speed)
+    max_context = min(4000, len(context))
+    context_trimmed = context[:max_context]
 
     types_str = " | ".join(TYPE_RULES.get(t, t) for t in question_types)
     types_list = ", ".join(question_types)
 
-    # ✅ OPTIMIZATION: Compact prompt (40% fewer tokens)
     prompt = f"""Generate {num_questions} exam questions on: "{topic}"
 Types: {types_list} | Difficulty: {difficulty}
 Material (use ONLY this):
@@ -93,22 +128,47 @@ Types: {types_str}
 Return ONLY JSON (no markdown):
 {{"topic":"{topic}","difficulty":"{difficulty}","duration_minutes":{duration_minutes},"questions":[{{"id":"q1","type":"mcq","question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"correct_answers":["B"],"explanation":"Why B is correct."}}]}}"""
 
-    # ✅ OPTIMIZATION: max_tokens=600 (was 2000)
-    # Claude stops generating as soon as JSON is complete, no padding
-    message = client.messages.create(
-        model=MODEL,
-        max_tokens=600,  # ← CRITICAL: Reduced from 2000
-        messages=[{"role": "user", "content": prompt}],
-    )
+    # ✅ FIX 1: Scale max_tokens based on number of questions
+    # Each question needs ~250 tokens (question + 4 options + explanation)
+    # Plus ~200 tokens for the JSON wrapper
+    tokens_needed = 200 + (num_questions * 280)
+    max_tokens = min(max(tokens_needed, 800), 4096)
+    
+    print(f"[QGen] Generating {num_questions} questions, max_tokens={max_tokens}")
 
-    result = _parse_json(message.content[0].text)
+    try:
+        message = client.messages.create(
+            model=MODEL,
+            max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        
+        raw_text = message.content[0].text
+        
+        # Check if response was truncated
+        if message.stop_reason == "max_tokens":
+            print(f"[QGen] ⚠️ Response was truncated (hit {max_tokens} token limit). Attempting recovery...")
+        
+        result = _parse_json(raw_text)
+        
+    except ValueError as e:
+        # JSON parsing failed
+        print(f"[QGen] ❌ JSON parse failed: {e}")
+        raise ValueError(f"Failed to generate valid questions. Please try again with fewer questions (try {max(1, num_questions // 2)}).")
+    except anthropic.APIError as e:
+        print(f"[QGen] ❌ Anthropic API error: {e}")
+        raise ValueError(f"AI service error: {str(e)[:100]}. Please try again.")
+    except Exception as e:
+        print(f"[QGen] ❌ Unexpected error: {e}")
+        raise ValueError(f"Question generation failed: {str(e)[:100]}")
+
     result["retrieved_sources"] = sources
     result["source_grounded"] = True
     return result
 
 
 # ============================================================================
-# OPTIMIZED ANSWER EVALUATION
+# ANSWER EVALUATION — FIXED
 # ============================================================================
 
 def evaluate_answers(
@@ -118,12 +178,12 @@ def evaluate_answers(
     test_id: str,
     time_taken_seconds: int,
 ) -> dict:
-    """Evaluate answers with optimized speed."""
+    """Evaluate answers with proper error handling."""
     
     if not questions:
         return _empty_result(student_id, test_id, time_taken_seconds)
 
-    # ✅ OPTIMIZATION: Score calculations in pure Python (instant, no API)
+    # Score in pure Python (instant)
     qa_breakdown = []
     score = 0
 
@@ -144,7 +204,7 @@ def evaluate_answers(
         })
 
     total = len(questions)
-    pct = round(score / total * 100, 1)
+    pct = round(score / total * 100, 1) if total > 0 else 0
     band = (
         "Excellent" if pct >= 85
         else "Good" if pct >= 70
@@ -153,9 +213,8 @@ def evaluate_answers(
     )
 
     wrong = [q for q in qa_breakdown if not q["is_correct"]]
-    right = [q for q in qa_breakdown if q["is_correct"]]
 
-    # ✅ OPTIMIZATION: Use stored explanations (no second API call needed)
+    # Per-question results using stored explanations (instant)
     instant_results = [
         {
             "id": q["id"],
@@ -171,8 +230,7 @@ def evaluate_answers(
         for q in qa_breakdown
     ]
 
-    # ✅ OPTIMIZATION: Only ONE Claude call for overall feedback
-    # Per-question feedback already done above
+    # Overall feedback from Claude (one call)
     wrong_topics = [q["question"][:80] for q in wrong[:3]]
 
     feedback_prompt = f"""Student scored {score}/{total} ({pct}%) on test. Band: {band}.
@@ -182,16 +240,15 @@ Give specific feedback. Return ONLY JSON:
 {{"overall_feedback":"2 sentences about their performance.","study_recommendations":["Tip 1","Tip 2"]}}"""
 
     try:
-        # ✅ OPTIMIZATION: max_tokens=300 (was 1200)
+        # ✅ FIX 2: Increased from 300 to 500
         msg = client.messages.create(
             model=MODEL,
-            max_tokens=300,  # ← CRITICAL: Reduced from 1200
+            max_tokens=500,
             messages=[{"role": "user", "content": feedback_prompt}],
         )
         feedback_data = _parse_json(msg.content[0].text)
     except Exception as e:
         print(f"[EVAL] Feedback call failed ({e}), using fallback")
-        # ✅ OPTIMIZATION: Fallback (instant, no API)
         feedback_data = _instant_feedback(score, total, pct, band, wrong)
 
     return {
